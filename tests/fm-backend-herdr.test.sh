@@ -2518,14 +2518,10 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   printf '%s\n' "{\"sessions\":[{\"name\":\"other\",\"running\":true,\"socket_path\":\"$dir/sockdir/other.sock\"}]}" > "$resp/3.out"
   : > "$dir/sockdir/other.sock"
   fb=$(make_herdr_fakebin "$dir")
-  # XDG_RUNTIME_DIR="" forces the deterministic per-uid /tmp fallback for this
-  # assertion regardless of the ambient test environment (fixture-set state
-  # persists per session/socket either way; see the XDG_RUNTIME_DIR-preferring
-  # and fallback tests below for the namespace choice itself).
-  path_a=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" XDG_RUNTIME_DIR="" \
+  path_a=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
     || fail "session lock path resolution failed for home A"
-  path_b=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" XDG_RUNTIME_DIR="" \
+  path_b=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
@@ -2536,7 +2532,7 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   case "$path_a" in
     */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
   esac
-  path_other=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" XDG_RUNTIME_DIR="" \
+  path_other=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path other' "$ROOT") \
     || fail "session lock path resolution failed for a different session"
   [ "$path_other" != "$path_a" ] || fail "different sessions must not share one lock path"
@@ -2545,10 +2541,10 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     : > /tmp/fm-herdr-lock-canon-$$.sock
     printf '%s\n' '{"sessions":[{"name":"canon","running":true,"socket_path":"/tmp/fm-herdr-lock-canon-'"$$"'.sock"}]}' > "$resp/4.out"
     printf '%s\n' "{\"sessions\":[{\"name\":\"canon\",\"running\":true,\"socket_path\":\"$(cd /tmp && pwd -P)/fm-herdr-lock-canon-$$.sock\"}]}" > "$resp/5.out"
-    path_tmp=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" XDG_RUNTIME_DIR="" \
+    path_tmp=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path canon' "$ROOT") \
       || fail "lock path with /tmp socket failed"
-    path_private=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" XDG_RUNTIME_DIR="" \
+    path_private=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path canon' "$ROOT") \
       || fail "lock path with canonical socket failed"
     rm -f /tmp/fm-herdr-lock-canon-$$.sock
@@ -2558,38 +2554,36 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   pass "herdr presentation lock: one path per session/socket across homes"
 }
 
-test_presentation_lock_namespace_prefers_xdg_runtime_dir() {
-  local runtime_dir dir expected
-  runtime_dir="$TMP_ROOT/xdg-runtime"; mkdir -p "$runtime_dir"
-  expected="$runtime_dir/firstmate-herdr-presentation"
-  dir=$(XDG_RUNTIME_DIR="$runtime_dir" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
-    || fail "namespace resolution failed with a usable XDG_RUNTIME_DIR"
-  [ "$dir" = "$expected" ] || fail "expected $expected, got $dir"
-  pass "herdr presentation lock namespace: prefers a usable XDG_RUNTIME_DIR"
-}
-
-test_presentation_lock_namespace_falls_back_without_xdg_runtime_dir() {
+test_presentation_lock_namespace_is_deterministic_per_uid() {
   local dir uid expected
   uid=$(id -u) || fail "could not resolve current uid"
   expected="/tmp/firstmate-herdr-presentation-$uid"
-  dir=$(XDG_RUNTIME_DIR="" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
-    || fail "namespace resolution failed with no XDG_RUNTIME_DIR"
+  dir=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "namespace resolution failed"
   [ "$dir" = "$expected" ] || fail "expected $expected, got $dir"
-  pass "herdr presentation lock namespace: falls back to a uid-suffixed /tmp path"
+  pass "herdr presentation lock namespace: resolves the deterministic uid-suffixed /tmp path"
 }
 
-test_presentation_lock_namespace_falls_back_on_unusable_xdg_runtime_dir() {
-  local dir uid expected missing
+test_presentation_lock_namespace_ignores_ambient_xdg_runtime_dir() {
+  local uid runtime_dir with_xdg without_xdg expected
   uid=$(id -u) || fail "could not resolve current uid"
   expected="/tmp/firstmate-herdr-presentation-$uid"
-  missing="$TMP_ROOT/xdg-runtime-does-not-exist"
-  dir=$(XDG_RUNTIME_DIR="$missing" \
+  runtime_dir="$TMP_ROOT/xdg-runtime-ambient"; mkdir -p "$runtime_dir"
+  # Two processes of the SAME user must resolve the identical namespace
+  # regardless of whether XDG_RUNTIME_DIR happens to be set in one of them
+  # (a systemd user session vs. a cron/sudo/detached invocation, say) -
+  # otherwise the two would split one user's own lock identity across two
+  # different directories and silently defeat the mutual exclusion the lock
+  # exists for.
+  with_xdg=$(XDG_RUNTIME_DIR="$runtime_dir" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
-    || fail "namespace resolution failed with a nonexistent XDG_RUNTIME_DIR"
-  [ "$dir" = "$expected" ] || fail "expected $expected, got $dir"
-  pass "herdr presentation lock namespace: falls back when XDG_RUNTIME_DIR is not usable"
+    || fail "namespace resolution failed with XDG_RUNTIME_DIR set"
+  without_xdg=$(bash -c 'unset XDG_RUNTIME_DIR; . "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT") \
+    || fail "namespace resolution failed with XDG_RUNTIME_DIR unset"
+  [ "$with_xdg" = "$without_xdg" ] \
+    || fail "XDG_RUNTIME_DIR must not split one user's lock identity: $with_xdg vs $without_xdg"
+  [ "$with_xdg" = "$expected" ] || fail "expected $expected, got $with_xdg"
+  pass "herdr presentation lock namespace: ignores ambient XDG_RUNTIME_DIR, same uid always resolves the same path"
 }
 
 test_presentation_lock_namespace_ignores_foreign_legacy_path() {
@@ -2602,8 +2596,7 @@ test_presentation_lock_namespace_ignores_foreign_legacy_path() {
   # read, chowned, chmodded, or migrated; only assert the resolver's return
   # value ignores it, and never mutate a pre-existing entry this test did not
   # create itself.
-  dir=$(XDG_RUNTIME_DIR="" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT")
+  dir=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_lock_namespace' "$ROOT")
   if [ "$created" -eq 1 ]; then rmdir "$legacy" 2>/dev/null || true; fi
   [ "$dir" = "/tmp/firstmate-herdr-presentation-$uid" ] \
     || fail "resolver must ignore the legacy shared path: $dir"
@@ -4605,9 +4598,8 @@ test_projection_order_anchors_the_parent_by_exact_id
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
-test_presentation_lock_namespace_prefers_xdg_runtime_dir
-test_presentation_lock_namespace_falls_back_without_xdg_runtime_dir
-test_presentation_lock_namespace_falls_back_on_unusable_xdg_runtime_dir
+test_presentation_lock_namespace_is_deterministic_per_uid
+test_presentation_lock_namespace_ignores_ambient_xdg_runtime_dir
 test_presentation_lock_namespace_ignores_foreign_legacy_path
 test_presentation_lock_namespace_valid_rejects_symlink
 test_presentation_lock_namespace_valid_rejects_wrong_mode
