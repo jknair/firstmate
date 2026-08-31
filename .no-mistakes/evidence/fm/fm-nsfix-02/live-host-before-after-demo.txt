@@ -1,0 +1,17 @@
+=== 1. Live host state (the reported multi-user collision, reproduced) ===
+/tmp/firstmate-herdr-presentation  owner=jknair-np(uid 1002)  mode=700
+current user: jknair (uid 1001)
+
+=== 2. BASE commit (4ad8cba) behavior for uid 1001 ===
+namespace resolves to: /tmp/firstmate-herdr-presentation   <- fixed shared path, no uid suffix
+regression proof: new per-uid test assertion FAILS on base code (as it must)
+namespace_valid: REFUSED (owner uid 1002 != current uid 1001)
+session_lock_path: FAILED (rc=1) -> herdr spawn/teardown BROKEN for this user
+
+=== 3. TARGET commit (c71a178) behavior for uid 1001 ===
+namespace resolves to: /tmp/firstmate-herdr-presentation-1001   <- per-user, deterministic
+with XDG_RUNTIME_DIR set: /tmp/firstmate-herdr-presentation-1001   <- identical, cannot split one user's lock identity
+session_lock_path: SUCCEEDED: /tmp/firstmate-herdr-presentation-1001/order-a2cd389e75cc52e48a055104c0831a7c.lock
+
+=== 4. Foreign-owned legacy dir untouched (never read/chown/chmod/migrated) ===
+/tmp/firstmate-herdr-presentation  owner=jknair-np(uid 1002)  mode=700  mtime=2026-08-31 15:50:20.680636566 +0000
